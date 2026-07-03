@@ -1,4 +1,4 @@
-# debconf-parser
+# debconf
 
 A lightweight debconf protocol parser and serializer.
 
@@ -8,7 +8,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-debconf-parser = "0.1.0"
+debconf = "0.1.0"
 dialoguer = "0.12"
 ```
 
