@@ -23,18 +23,15 @@ pub fn run_debconf_loop<R: BufRead, W: Write>(mut reader: R, raw_writer: W) -> s
     let mut line = String::new();
     let mut tx = DebconfWriter::new(raw_writer);
 
-    // 协议内部状态机上下文缓存
-    let mut current_description = String::from("请选择配置项：");
+    let mut current_description = String::from("Please select a configure item:");
     let mut current_choices = Vec::new();
     let mut last_user_answer = String::new();
     
-    // 🔑 从单一的布尔标记升级为强类型的字符串题型跟踪
     let mut current_question_type = String::from("string");
 
     while reader.read_line(&mut line)? > 0 {
         let cmd = parse_line(&line);
 
-        // 判定是否收到 Goodbye 信号以优雅退出
         let should_break = matches!(cmd, DebconfCommand::Goodbye);
 
         let response = match cmd {
@@ -137,7 +134,6 @@ pub fn run_debconf_loop<R: BufRead, W: Write>(mut reader: R, raw_writer: W) -> s
             _ => Some(DebconfResponse::Ok),
         };
 
-        // 统一的数据应答喷回与挂断逻辑
         if let Some(resp) = response {
             if let Err(e) = tx.send(&resp) {
                 eprintln!("Failed to send response to debconf backend: {}", e);
