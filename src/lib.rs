@@ -1,7 +1,8 @@
 use enumflags2::{BitFlags, bitflags};
 use nom::{
     IResult, Parser,
-    bytes::complete::tag,
+    branch::alt,
+    bytes::{complete::tag, take_until},
     combinator::{map, rest},
     sequence::preceded,
 };
@@ -21,6 +22,14 @@ pub enum Capability {
     Progress = 0b1000,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DescriptionContent {
+    Type(String),
+    Short(String),
+    Extended(String),
+    Unknown(String),
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum DebconfCommand {
     /// Handshake command to declare capabilities, carrying the raw capabilities string supported by the backend.
@@ -28,7 +37,10 @@ pub enum DebconfCommand {
     /// Sets the title text of the current configuration context.
     Title(String),
     /// The core interactive description/prompt text (with status suffixes automatically stripped and physical newlines restored).
-    Description(String),
+    Description {
+        question: String,
+        content: DescriptionContent,
+    },
     /// A comma-separated list of candidate choices sent by the backend for single-choice or multi-choice scenarios.
     Choices(Vec<String>),
     /// Input readiness notification, containing the priority of the question and its unique identifier.
@@ -111,20 +123,70 @@ fn parse_title(input: &str) -> IResult<&str, DebconfCommand> {
     .parse(input)
 }
 
-fn parse_data(input: &str) -> IResult<&str, DebconfCommand> {
-    let (input, _) =
-        nom::branch::alt((tag("DATA "), tag("METAGET "), tag("extended_description ")))
-            .parse(input)?;
+fn parse_and_unescape(mut input: &str) -> String {
+    let mut result = String::new();
+    
+    while !input.is_empty() {
+        if let Some(rest) = input.strip_prefix(r#"\n"#).or_else(|| input.strip_prefix("\\n")) {
+            result.push('\n');
+            input = rest;
+        } else if let Some(rest) = input.strip_prefix('\\') {
+            result.push('\\');
+            if !rest.is_empty() {
+                let (ch, next) = rest.split_at(1);
+                result.push_str(ch);
+                input = next;
+            } else {
+                input = rest;
+            }
+        } else {
+            if let Some(pos) = input.find('\\') {
+                let (left, right) = input.split_at(pos);
+                result.push_str(left);
+                input = right;
+            } else {
+                result.push_str(input);
+                break;
+            }
+        }
+    }
 
-    // Strips the status suffix at the end (e.g., ": yes")
+    result
+}
+
+pub fn parse_data(input: &str) -> IResult<&str, DebconfCommand> {
+    let (input, _) = alt((tag("DATA "), tag("METAGET "))).parse(input)?;
+
+    let (input, question) = take_until(" ").parse(input)?;
+    let question = question.trim().to_string();
+
+    let (input, _) = tag(" ").parse(input)?;
+
     let clean_text = match input.rsplit_once(": ") {
         Some((text_part, _)) => text_part.trim(),
         None => input.trim(),
     };
 
-    // Converts literal \n to actual newline characters for subsequent TUI elegant formatting
-    let processed = clean_text.replace("\\n", "\n").replace(r#"\n"#, "\n");
-    Ok(("", DebconfCommand::Description(processed)))
+    let content_result: IResult<&str, DescriptionContent> = alt((
+        preceded(tag("type "), rest).map(|t: &str| DescriptionContent::Type(t.trim().to_string())),
+        preceded(tag("description "), rest).map(|s: &str| {
+            let unescaped = parse_and_unescape(s.trim());
+            DescriptionContent::Short(unescaped)
+        }),
+        preceded(tag("extended_description "), rest).map(|e: &str| {
+            let unescaped = parse_and_unescape(e.trim());
+            DescriptionContent::Extended(unescaped)
+        }),
+        rest.map(|u: &str| {
+            let unescaped = parse_and_unescape(u.trim());
+            DescriptionContent::Unknown(unescaped)
+        }),
+    ))
+    .parse(clean_text);
+
+    let (_, content) = content_result.unwrap();
+
+    Ok(("", DebconfCommand::Description { question, content }))
 }
 
 fn parse_choices(input: &str) -> IResult<&str, DebconfCommand> {
@@ -199,11 +261,24 @@ mod tests {
         assert_eq!(parse_line("GO"), DebconfCommand::Go);
         assert_eq!(parse_line("GOODBYE"), DebconfCommand::Goodbye);
 
-        if let DebconfCommand::Description(desc) = parse_line("DATA please enter host\\nname: yes")
-        {
-            assert_eq!(desc, "please enter host\nname");
+        let raw_data_line =
+            "DATA my-app/host_prompt extended_description please enter host\\nname: yes";
+        if let DebconfCommand::Description { question, content } = parse_line(raw_data_line) {
+            assert_eq!(question, "my-app/host_prompt");
+            assert_eq!(
+                content,
+                DescriptionContent::Extended("please enter host\nname".to_string())
+            );
         } else {
-            panic!("DATA parse failed");
+            panic!("DATA extended_description parse failed");
+        }
+
+        let raw_note_line = "DATA mise/configuration_hints type note";
+        if let DebconfCommand::Description { question, content } = parse_line(raw_note_line) {
+            assert_eq!(question, "mise/configuration_hints");
+            assert_eq!(content, DescriptionContent::Type("note".to_string()));
+        } else {
+            panic!("DATA type note parse failed");
         }
     }
 
